@@ -187,4 +187,19 @@ def V_threshold_C(V,I, I_thresh=50e-6):
                 
             circle.append(i)      
     return V_threshold, V_down, bool_threshold, circle
-
+def SymmetryCheck(I_filt, V_filt, t_filt):
+    
+    t_int=t_filt[np.where(I_filt == max(I_filt))]-t_filt[np.where(I_filt==min(I_filt))]
+    comp_segments = find_read_sections(np.where(abs(I_filt)>0.5e-4)[0])
+    comp_r1 = (V_filt[comp_segments[0][10]]-V_filt[comp_segments[0][0]])/(I_filt[comp_segments[0][10]]-I_filt[comp_segments[0][0]])
+    comp_r2 = (V_filt[comp_segments[1][-1]]-V_filt[comp_segments[1][-11]])/(I_filt[comp_segments[1][-1]]-I_filt[comp_segments[1][-11]])
+    comp1 = abs(len(comp_segments[0])-len(comp_segments[1]))/len(comp_segments[0])
+    comp2 = abs(abs(max(I_filt))-abs(min(I_filt)))
+    comp3 = abs(comp_r1 - comp_r2) / comp_r1
+    
+    if comp1<0.1 and comp2<5e-6 and comp3<0.1:
+        print('Symmetry of Current Curve is good')
+    else:
+        print('Not good symmetry yet')
+    result=comp1<10 and comp2<5e-6 and comp3<0.1
+    return result
