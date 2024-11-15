@@ -16,6 +16,7 @@ from measurement_control.instrument_setups.k4200_setup import MeasurementType, P
 from measurement_control.instruments.thorlabs_kinesis_stage import KinesisStage
 from measurement_control.files import TextFile
 from measurement_control.instrument_setups.k4200_setup import IntegrationTime
+from measurement_control import config
 
 import matplotlib.pyplot as plt
 
@@ -111,15 +112,22 @@ sample_layout = "Jalil\LineArray\SingleCell"
 sample_material = 'AIST'
 sample_name = 'NT_LPCM_line_array_AIXCCT_2'
 
+config.operator = "Zhao"
+config.sample = "PCM" + sample_material + '_' + sample_name
 
 ### id devices measured
+# Load wafer info
+positions, label, geometry = mask_singleDev_LineArray()
 
 
-start_site =7
-stop_site  =9
-dist_meas = 1
+start_site =1472
+stop_site  =2400
+dist_meas = 10
+blocks_meas = ['C1','D1','A2','C2','D2','A6','C6','D6']
+
 DevicesTest = np.arange(start_site, stop_site, dist_meas)
-
+DevicesTest = DevicesTest[[l[0][0] in blocks_meas for l in label[DevicesTest]]]
+DevicesTest = DevicesTest[np.argmin(abs(DevicesTest-1482))-1:]
 
 ### Starting voltages
 
@@ -129,7 +137,7 @@ Vpulse1_start=[1,0]
 Vpulse2_start=[-1,0]
 
 #Precycling
-Vset_start=[2,0]
+Vset_start=[1,0]
 Vreset_start=[-1,0]
 Vread_start=[0.4,0]
 
@@ -166,13 +174,11 @@ meas_range2=1e-5
 
 
 # Definition resistive states
-R_min_HRS, R_max_LRS = 1e5, 5e3
+R_min_HRS, R_max_LRS = 30e3, 5e3
 
 # Measurement setup
 bool_TS2000 = True # if True TS2000 if False MSAuto 
 
-# Load wafer info
-positions, label, geometry = mask_singleDev_LineArray()
 
 
 #%% Connect to Setup
@@ -205,6 +211,7 @@ with KinesisStage(
     # stage.move_to( 1.2497, 11.902, 9.5)
 
 #%%    
+data_provide = {}
 with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_termination='\0',\
                                    write_termination='\0',),num_pmus=2,num_smus=4) as keithley:
     with KinesisStage(
@@ -216,6 +223,8 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
     
     
         for device_id in DevicesTest:
+            print()
+            
             device_broken=False
             pos_wfm =positions[device_id]
             pos_step = calc_with_dist(pos_wfm)
@@ -223,8 +232,16 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
             stage.move_to(pos_step[0], pos_step[1], 9.5)
             stage.contact()
 
-            #stage.move_to( x_dev, y_dev, 10)
+            
             device =  label[device_id][0][0]+'_'+label[device_id][1][0]
+            
+            # Save info device
+            data_provide['id_device'] = str(device_id)
+            data_provide['label_device'] = device
+            data_provide['position_device_y'] = str(positions[device_id][1])
+            data_provide['position_device_x'] = str(positions[device_id][0])
+
+            print('Measuring device ' + device)
             PathDevice = os.path.join(PathSample, os.path.join(label[device_id][0][0], label[device_id][1][0]))
             os.makedirs(PathDevice, exist_ok=True)
             ##########################################
@@ -233,8 +250,12 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
             # 1. Start: Vsweep = 1 V, n_rep = 1 
             # 2. While R > R_max_LRS and sweep not symmetric 
             # 3. Measure one sweep and if 2. False Vsweep += 0.2 V
+            
+            data_provide['action'] = 'Init sweep'
+
             n_cyc_presweep, delta_V_presweep = 1, 0.2
             Vpulse1, Vpulse2 = copy.deepcopy(Vpulse1_start), copy.deepcopy(Vpulse2_start)
+            data_provide['cycle'] = '1'
             presweep_wf = init_waveform_fast_sweep(keithley, 
                                               Vpulse1=Vpulse1,
                                               Vpulse2=Vpulse2,
@@ -246,7 +267,8 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                                               meas_range2=1e-3)
             
             cycle_time = time.strftime('%d-%m-%Y_%H-%M-%S', time.localtime())
-            presweep = presweep_wf.run(file=TextFile(os.path.join(PathDevice,'Sweep_'+str(np.argmax(np.abs(Vpulse1)))+'V_'+cycle_time+'.txt')))
+            presweep = presweep_wf.run(file=TextFile(os.path.join(PathDevice,'IniSweep_'+str(np.argmax(np.abs(Vpulse1)))+'V_'+cycle_time+'.txt')),
+                                   custom_metadata=data_provide)
             
         
             V = presweep['v1'].to_numpy()
@@ -264,10 +286,11 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
             
             R_HRS, R_LRS = calc_R1_list(I, V,0.9, 0.1, V_max_small=0.9, V_min_small=0.2, I_res=8e-6)
             Symm =SymmetryCheck(I_filt, V_filt, t_filt)
-            while Symm==False or any(R_LRS>R_max_LRS):
+            
+            while Symm==False or any(R_LRS>R_max_LRS) or n_cyc_presweep<100:
               # 5. If current not Symmetric and  R > R_max_LRS 
               # 6. GOTO 2 with Vsweep += 0.2V
-    
+                data_provide['cycle'] = str(n_cyc_presweep)
                 presweep_wf = init_waveform_fast_sweep(keithley, 
                                                   Vpulse1=Vpulse1,
                                                   Vpulse2=Vpulse2,
@@ -279,7 +302,8 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                                                   meas_range2=1e-3)
                 
                 cycle_time = time.strftime('%d-%m-%Y_%H-%M-%S', time.localtime())
-                presweep = presweep_wf.run(file=TextFile(os.path.join(PathDevice,'Sweep_'+str(np.argmax(np.abs(Vpulse1)))+'V_'+cycle_time+'.txt')))
+                presweep = presweep_wf.run(file=TextFile(os.path.join(PathDevice,'IniSweep_'+str(np.argmax(np.abs(Vpulse1)))+'V_'+cycle_time+'.txt')),
+                                       custom_metadata=data_provide)
 
                 V = presweep['v1'].to_numpy()
                 I = presweep['i2'].to_numpy()
@@ -291,7 +315,7 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                 plt.ylabel('I  / $\mu$A')
                 plt.yscale('log')
                 plt.title('First sweep')
-                plt.savefig(os.path.join(PathDevice,"Set_"+device+cycle_time+".png"))
+                plt.savefig(os.path.join(PathDevice,"IniSweep_"+device+cycle_time+".png"))
                 plt.show()
                 R_HRS, R_LRS = calc_R1_list(I, V,0.9, 0.1, V_max_small=0.9, V_min_small=0.2, I_res=8e-6)
                 Symm=SymmetryCheck(I_filt, V_filt, t_filt)
@@ -318,6 +342,7 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
             ##########################################
             # 7. If R_HRS >R_min_HRS and R_LRS < R_max_LRS and n_switch < 1000 goto 6. n_switch += 500
             
+            data_provide['action'] = 'Precycle'
             
             # 1. Start: Vreset = 1 V and Vset = 2 V, n_rep = 1, V_step = 0.5 V (Waveform sweep and pulse)
             Vset = copy.deepcopy(Vset_start)
@@ -326,8 +351,9 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
             delta_set_pre, delta_reset_pre = 0.1, 0.3
             # 2. While R_HRS < R_min_HRS and R_LRS > 10e3
             n_meas=0
-            while (any(R_HRS<R_min_HRS) or any(R_LRS> R_max_LRS)) or n_meas<500:
+            while (any(R_HRS<R_min_HRS) or any(R_LRS> R_max_LRS)) or n_meas<1000:
                 # 3. Measure
+                data_provide['cycle'] = str(n_cyc_prepar_switch)
                 switch_wf = init_waveform_switching_SetReset(keithley, 
                                                   Vset=Vset,
                                                   Vreset=Vreset,
@@ -344,7 +370,8 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                                                   bool_retention=False,
                                                   time_gap_lists=[1e-6, 1e-5,1e-4, 1e-3, 1e-2])
                 cycle_time = time.strftime('%d-%m-%Y_%H-%M-%S', time.localtime())
-                switch = switch_wf.run(file=TextFile(os.path.join(PathDevice,'Switch_Set'+str(np.argmax(np.abs(Vset)))+'V_Reset'+str(np.argmax(np.abs(Vreset)))+'V_'+cycle_time+'.txt')))
+                switch = switch_wf.run(file=TextFile(os.path.join(PathDevice,'Precycle_'+str(np.argmax(np.abs(Vset)))+'V_Reset'+str(np.argmax(np.abs(Vreset)))+'V_'+cycle_time+'.txt')),
+                                       custom_metadata=data_provide)
                 V = switch['v1'].to_numpy()
                 I = switch['i2'].to_numpy()
                 t = abs(switch['time'].to_numpy())
@@ -354,18 +381,24 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                 plt.xlabel('Voltage / V')
                 plt.ylabel('I  / $\mu$A')
                 plt.yscale('log')
-                plt.title('First sweep')
-                plt.savefig(os.path.join(PathDevice,"Set_"+device+cycle_time+".png"))
+                plt.title(r'Prepare device n$_{cycle}$'+str(n_meas))
+                plt.savefig(os.path.join(PathDevice,"Precycle_"+device+cycle_time+".png"))
                 plt.show()
                 R_HRS, R_LRS = calc_R1_list(I, V,0.9, 0.1, V_max_small=0.9, V_min_small=0.2, I_res=8e-6)
         
                 if any(R_HRS<R_min_HRS): 
-                    Vreset[np.argmax(np.abs(Vreset))] += np.sign(Vreset[np.argmax(np.abs(Vreset))])*delta_V_presweep
+                    if len(R_HRS>=10):
+                        if np.median(R_HRS[:5])>R_min_HRS and np.median(R_HRS[-5:])<R_min_HRS:
+                            Vreset[np.argmax(np.abs(Vreset))] -= np.sign(Vreset[np.argmax(np.abs(Vreset))])*3*delta_V_presweep
+                        else:
+                            Vreset[np.argmax(np.abs(Vreset))] += np.sign(Vreset[np.argmax(np.abs(Vreset))])*delta_V_presweep
+
+                    else:
+                        Vreset[np.argmax(np.abs(Vreset))] += np.sign(Vreset[np.argmax(np.abs(Vreset))])*delta_V_presweep
                     n_cyc_prepar_switch = 1
                 elif all(R_HRS>5*R_min_HRS) and not any(R_LRS>R_max_LRS):
                     Vreset[np.argmax(np.abs(Vreset))] -= np.sign(Vreset[np.argmax(np.abs(Vreset))])*delta_reset_pre 
                     delta_reset_pre = 0.1
-                    n_cyc_prepar_switch = 1
                 elif any(R_LRS>R_max_LRS):
                     Vset[np.argmax(np.abs(Vset))] += np.sign(Vset[np.argmax(np.abs(Vset))])*delta_set_pre
                     n_cyc_prepar_switch=1
@@ -377,57 +410,32 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                 V_threshold, V_down, bool_threshold = V_threshold_2(V,I,I_thresh=-20e-6)
                 if max(np.abs(V_threshold))>np.max(np.abs(Vset))-0.3:
                     n_cyc_prepar_switch = 1
-                    Vreset[np.argmax(np.abs(Vreset))] -= np.sign(Vreset[np.argmax(np.abs(Vreset))])*delta_reset_pre 
+                    Vreset[np.argmax(np.abs(Vreset))] -= np.sign(Vreset[np.argmax(np.abs(Vreset))])*delta_reset_pre *3
                     Vset[np.argmax(np.abs(Vset))] += np.sign(Vset[np.argmax(np.abs(Vset))])*delta_set_pre
-                if max(abs(I))<50e-6 and np.max(np.abs(Vset))>3:
+                if (max(abs(I))<50e-6 and np.max(np.abs(Vset))>3) or np.max(np.abs(Vreset))<0.5:
                     device_broken=True
                     break
             if device_broken:
                 continue
-                    
+               
             ##########################################
             ## Varry reset
             ##########################################
             # 1. Start at Vreset = 1 V and Vset = 2 V n_switch = 100 one sweep one reset in every waveform
-            """
-            #Vset=Vset_start
-            Vreset=Vreset_start
-            switch_wf = init_waveform_switching_SetReset(keithley, 
-                                              Vset=Vset,
-                                              Vreset=Vreset,
-                                              sweep_rate_1=1e6,
-                                              timewidthPulse2=200e-9,
-                                              timeLEPulse2=20e-9,
-                                              timeTEPulse2=20e-9,
-                                              timewidthRead=1e-2,
-                                              timeEdgesRead=1e-3,
-                                              timeWait=1e-5,
-                                              nr_cycle=1000,
-                                              meas_range1=1e-2,
-                                              meas_range2=1e-3,
-                                              bool_retention=False,
-                                              time_gap_lists=[1e-6, 1e-5,1e-4, 1e-3, 1e-2])
-            switch = switch_wf.run(file=TextFile(os.path.join(PathDevice,'Test_switch.txt')))
-            V = switch['v1'].to_numpy()
-            I = switch['i2'].to_numpy()
-            t = abs(switch['time'].to_numpy())
-            I_filt, V_filt, t_filt = filter_data(I, V, t, Nmean=5)
-            plt.plot(V_filt, abs(I_filt))
-            plt.yscale('log')
-            plt.xlabel('Voltage / V')
-            plt.ylabel('I  / $\mu$A')
-            plt.yscale('log')
-            plt.title('First sweep')
-            plt.savefig(os.path.join(PathDevice,"Set_"+device+cycle_time+".png"))
-            plt.show()
-            R_HRS, R_LRS = calc_R1_list(I, V,0.9, 0.1, V_max_small=0.9, V_min_small=0.2, I_res=8e-6)
-            """
+           
+            data_provide['action'] = 'Var. reset'
+            runs_bad = 0
             # 2. For Vreset in {1 + 0.3 * i| i in N, i<11}
-            for  Vreset_volt in {np.round(1 + 0.3 * i,2) for i in range(11)}:
+            for  Vreset_volt in np.sort([a for a in {np.round(1 + 0.1 * i,2) for i in range(46)}]):
                 Vreset[np.argmax(np.abs(Vreset))] = -Vreset_volt
                 # 5. Measure
                 n_meas, n_rep_var = 1, 20
+                no_reset = 0
+                seems_reset = 0
+                device_broken =False
+                runs_bad = 0
                 while n_meas < 999:
+                    data_provide['cycle'] = str(n_rep_var)
                     switch_wf = init_waveform_switching_SetReset(keithley, 
                                                       Vset=Vset,
                                                       Vreset=Vreset,
@@ -445,30 +453,52 @@ with Keithley4200A(communicator=TCPIPCommunicator('169.254.26.11',1225,read_term
                                                       bool_retention=False,
                                                       time_gap_lists=[1e-6, 1e-5,1e-4, 1e-3, 1e-2])
                     cycle_time = time.strftime('%d-%m-%Y_%H-%M-%S', time.localtime())
-                    switch = switch_wf.run(file=TextFile(os.path.join(PathDevice,'Switch_Set'+str(np.argmax(np.abs(Vset)))+'V_Reset'+str(np.argmax(np.abs(Vset)))+'V_'+cycle_time+'.txt')))
+                    switch = switch_wf.run(file=TextFile(os.path.join(PathDevice,'Varry_Vreset_'+str(np.round(np.max(np.abs(Vset)),1))+'V_Reset'+str(np.round(np.max(np.abs(Vset)),1))+'V_'+cycle_time+'.txt')),
+                                           custom_metadata=data_provide)
                     V = switch['v1'].to_numpy()
                     I = switch['i2'].to_numpy()
                     t = abs(switch['time'].to_numpy())
                     I_filt, V_filt, t_filt = filter_data(I, V, t, Nmean=5)
                     # 4. if device broken(I_max too low)
-                    if max(I_filt)< 25e-5:
-                        print("Devices damaged at Vreset", Vreset_volt, "V")
-                        # 5. Break
-                        break
                     plt.plot(V_filt, abs(I_filt))
                     plt.yscale('log')
                     plt.xlabel('Voltage / V')
                     plt.ylabel('I  / $\mu$A')
                     plt.yscale('log')
-                    plt.title('First sweep')
-                    plt.savefig(os.path.join(PathDevice,"Set_"+device+cycle_time+".png"))
+                    plt.title(r'Var reset V$_{reset}$ = ' + str(np.round(Vreset[0],1)))
+                    plt.savefig(os.path.join(PathDevice,"Varry_Vreset_"+device+cycle_time+".png"))
                     plt.show()
                     R_HRS, R_LRS = calc_R1_list(I, V,0.9, 0.1, V_max_small=0.9, V_min_small=0.2, I_res=8e-6)
                     n_meas += n_rep_var
-                    if max(abs(I))<50e-6:
+                    
+                    if max(abs(R_HRS))< 3*max(abs(R_LRS)):
+                        no_reset += 1
+                        if no_reset > 5:
+                            #device_broken = True
+                            break
+                    elif max(abs(R_HRS)) < R_min_HRS:
+                        seems_reset += 1
+                        if seems_reset > 10:
+                            #device_broken = True
+                            break
+
+                    if max(abs(I))<50e-6 and device_broken:
                         device_broken=True
                         break
+                    if any(R_LRS>R_max_LRS):
+                        Vset[np.argmax(np.abs(Vset))] += np.sign(Vset[np.argmax(np.abs(Vset))])*0.2
+                        runs_bad += 1
+                        if runs_bad>3:
+                            device_broken=True
+                            
+                        print("Devices damaged at Vreset", Vreset_volt, "V")
+                    else: 
+                        runs_bad = 0
+                        device_broken=False
+
                 if device_broken:
+                
+                    print("Devices not useable for Vreset = ", Vreset_volt, " V")
                     break
             if device_broken:
                 continue
