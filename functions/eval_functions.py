@@ -50,7 +50,7 @@ def find_read_sections(read_indices, n = 20, min_length = 50):
     return indices_read
 
 #%% Calc R
-def calc_R1_list(I, V,V_max, V_min, V_max_small=0.9, V_min_small=0.2, I_res=8e-6):
+def calc_R1_list(I, V,V_max, V_min, V_max_small=0.9, V_min_small=0.1, I_res=8e-6):
     """
     \For 1 d vectors
     
@@ -74,37 +74,43 @@ def calc_R1_list(I, V,V_max, V_min, V_max_small=0.9, V_min_small=0.2, I_res=8e-6
     R_value = []
     
     for i_read, indices in enumerate(find_read_sections(np.where(np.logical_and(abs(V)<V_max_small,
-                                                              abs(V)>V_min_small))[0],n=10,min_length=50)):
+                                                              abs(V)>V_min_small))[0],n=5,min_length=10)):
     
         R=0
         # indices = indices[I_filt[i][indices]<50e-6]
         x_all, y_all = abs(V[indices]), I[indices]
+        if np.mean(np.diff(x_all)[-2:])<-0.1:
+            continue
         if min(x_all)<0.25:
 
             if sum(y_all > I_res)<len(y_all)*0.5: 
-                
-                for V_max in np.linspace(0.9,0.5, 7):
+                R_list = list()
+                for V_max in np.linspace(0.9,0.3, 6):
                     try:
-                        mask = find_read_sections(np.where(np.logical_and(x_all<V_max,x_all>V_min))[0],n=10,min_length=50)[0]
+                        mask = find_read_sections(np.where(np.logical_and(x_all<V_max,x_all>V_min))[0],n=5,min_length=5)[0]
                     except:
                         break
                     x, y = x_all[mask],y_all[mask]
-                    if linregress(x,y).pvalue>1e-7:
+                    R_list.append(1/abs(linregress(x,y).slope))
+                    """
+                    if abs(linregress(x,y).pvalue)>1e-7:
                         R = abs(1/np.polyfit(x,y,1)[0])
                         break
+                    """
+                R = np.mean(np.sort(R_list)[-2:])
             else:
                 pass
 
             if R ==0:
                 
                 V_max, V_min = 0.9, 0.15
-                mask = find_read_sections(np.where(np.logical_and(x_all<V_max,x_all>V_min))[0],n=10,min_length=50)[0]
+                mask = find_read_sections(np.where(np.logical_and(x_all<V_max,x_all>V_min))[0],n=5,min_length=5)[0]
                 x, y =x_all[mask], y_all[mask]
                 if min(y)>50e-6:
                     R = abs(1/np.polyfit(x,y,1)[0])
                 else:
                     V_max, V_min = 0.4, 0.1
-                    mask = find_read_sections(np.where(np.logical_and(x_all<V_max,x_all>V_min))[0],n=10,min_length=50)[0]
+                    mask = find_read_sections(np.where(np.logical_and(x_all<V_max,x_all>V_min))[0],n=5,min_length=5)[0]
                     x, y =x_all[mask], y_all[mask]
                 
                     R = abs(1/np.polyfit(x,y,1)[0])
@@ -129,7 +135,7 @@ def V_threshold_T(V,I):
                 V_threshold.append(-1)
             else: 
                 bool_threshold.append(True)
-                V_threshold.append(V_filt[i][segments][int(np.argmax(np.diff(Isweep)))])
+                V_threshold.append(V[i][segments][int(np.argmax(np.diff(Isweep)))])
             circle.append(i)
             
     return V_threshold, bool_threshold, circle
@@ -139,24 +145,28 @@ def V_threshold_2(V,I, I_thresh=20e-6):
     V_down = []
     bool_threshold=[]
     circle=[]
-    for i, Icyc in enumerate(I):
-        sweep_segments = find_read_sections(np.where(V[i]>0.15)[0])
-        for segments in sweep_segments:
-            Isweep =  Icyc[segments]
-            index_jump = np.where(Isweep>I_thresh)
-            try:
-                V_start, V_end = V[i][segments][index_jump[0][[1,-1]]]    
+    sweep_segments = find_read_sections(np.where(V>0.15)[0])
+    for segments in sweep_segments:
+        Isweep =  I[segments]
+        try:
+            if I_thresh>0:
+                index_jump = np.where(Isweep>I_thresh)
+                V_start, V_end = V[segments][index_jump[0][[1,-1]]]    
                 bool_threshold.append(True)
                 V_threshold.append(V_start)
                 V_down.append(V_end)
+            else:
+                index_jump = np.where(Isweep<I_thresh)
+                V_start, V_end = V[segments][index_jump[0][[1,-1]]]    
+                bool_threshold.append(True)
+                V_threshold.append(V_start)
+                V_down.append(V_end)
+        except:
+            bool_threshold.append(False)
+            V_threshold.append(-100)
+            V_down.append(-100)
             
-            except:
-                bool_threshold.append(False)
-                V_threshold.append(-1)
-                V_down.append(-1)
-                
-            circle.append(i)      
-    return V_threshold, V_down, bool_threshold, circle
+    return V_threshold, V_down, bool_threshold
 
 def V_threshold_C(V,I, I_thresh=50e-6):
     V_threshold=[]
